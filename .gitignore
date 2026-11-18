@@ -1,0 +1,10 @@
+# Personal data stays out of the code repo (memory/ is its own git repo).
+data/
+memory/
+issues/
+reports/
+tasks/
+config.toml
+__pycache__/
+*.pyc
+notes/

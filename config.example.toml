@@ -1,0 +1,27 @@
+# Copy to config.toml and change only what you need. Every key here overrides the default in shana/config.py.
+
+[notify]
+mac = true
+# ntfy_topic = "shana-xxxxxxxx"   # set by `shana setup-phone`
+
+[monitor]
+stuck_minutes = 15
+finished_min_seconds = 60
+
+[report]
+hour = 21   # nightly report time (run `shana install` again after changing)
+
+[models]
+cheap = ["deepseek:deepseek-chat", "claude:haiku"]
+mid = ["claude:sonnet"]
+strong = ["claude:opus"]
+
+[providers.deepseek]
+base_url = "https://api.deepseek.com/anthropic"
+key_env = "DEEPSEEK_API_KEY"
+price_in = 0.0    # USD per 1M input tokens — copy from the provider's price page
+price_out = 0.0   # USD per 1M output tokens
+
+[orchestrator]
+budget_usd = 2.0
+max_escalations = 2
