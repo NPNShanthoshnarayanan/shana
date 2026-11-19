@@ -42,6 +42,13 @@ def _opencode_quality(start: datetime) -> int:
                                       f"Session: {s['session']}\n\nShana said:\n> {s['shana_said']}\n\nUser: {s['user']}",
                                       source="auto", kind="bug")
         added += bool(new)
+    for kind, title in (("unproven-claim", "Said 'works/fixed/done' in a turn that ran no tool to check it"),
+                        ("repeated-order", "User had to repeat an order ('fix it', 'do it') before Shana acted")):
+        hits = [x for x in signals if x["kind"] == kind]
+        if hits:
+            new, _ = tracker.add_or_match(f"{title} ({len(hits)} times)", "\n".join(
+                f"- {x['session']}: {x.get('said') or x.get('user')}" for x in hits[:8]), source="auto", kind="bug")
+            added += bool(new)
     labels = [x for x in signals if x["kind"] == "false-model-label"]
     if labels:
         new, _ = tracker.add_or_match(f"Replies named the wrong model ({len(labels)} times)",

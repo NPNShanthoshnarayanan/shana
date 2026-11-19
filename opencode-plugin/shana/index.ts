@@ -4,6 +4,20 @@ import { Plugin } from "@opencode/plugin"
 import { readFileSync } from "node:fs"
 
 const pretty = (id: string) => id.split("/").pop()!.replace(/-/g, " ")
+const ORDER = /\b(fix|do)\s+(it|that|this|all|them|#\d+)\b|^\W*(yes|go ahead|just do it)\W*$/i
+
+const BALANCE = /\b(balance|credits?|remaining (money|amount|cost|budget)|how much (is )?left)\b/i
+
+// Text of the newest user message, whatever shape the host gives (role/info.role, string or parts).
+function lastUserText(msgs: any[]): string {
+  for (let k = (msgs?.length ?? 0) - 1; k >= 0; k--) {
+    const m = msgs[k]
+    if ((m?.role ?? m?.info?.role ?? m?.type) !== "user") continue
+    const c = m.content ?? m.parts ?? m.text ?? ""
+    return typeof c === "string" ? c : (Array.isArray(c) ? c : []).map((p: any) => p?.text ?? "").join(" ")
+  }
+  return ""
+}
 
 function budgetShare(path: string): number {
   try {
@@ -29,6 +43,25 @@ export default Plugin.define({
           `If you name the model (a label, or when asked which model answered), use exactly "[${pretty(event.model?.id ?? "?")}]". ` +
           `Never claim to be any other model, and never say you switched models: you cannot change your own model.`,
       })
+      const said = lastUserText(event.messages).trim()
+      if (BALANCE.test(said)) {
+        event.system.push({
+          type: "text",
+          text:
+            "[Shana fact] Shana's key cannot read the DeepInfra balance: no API, page or curl call will work, so do " +
+            "not try any. Answer from the live status below (or shana_budget) and give the link " +
+            "https://deepinfra.com/dash/billing for the exact balance.",
+        })
+      }
+      if (ORDER.test(said)) {
+        event.system.push({
+          type: "text",
+          text:
+            "[Shana fact] The user's last message is a direct order and counts as approval. Do the work now, in this " +
+            "turn. Do not ask \"Want me to…?\" or \"Shall I track this?\". For a Shana problem use shana_issue_add " +
+            "with fix_now=true or shana_issue_approve, then report the tool's RECEIPT.",
+        })
+      }
       try {
         const live = readFileSync(liveFile, "utf8").slice(0, 900)
         if (live) event.system.push({ type: "text", text: `[Shana live status, real data, refreshed every few minutes]\n${live}` })

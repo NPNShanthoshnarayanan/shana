@@ -63,10 +63,41 @@ def available(spec: str) -> bool:
     return True
 
 
+def quality(spec: str) -> dict:
+    """Pass rate of the model's last checked runs (orchestrator steps and tracker fixes, from data/quality.jsonl)."""
+    from shana.util import parse_ts, read_jsonl
+    q = config.load()["quality"]
+    runs = [e for e in read_jsonl(config.path("data", "quality.jsonl")) if e.get("spec") == spec and e.get("checked")]
+    last = runs[-int(q["window"]):]
+    rate = sum(bool(e["ok"]) for e in last) / len(last) if last else 1.0
+    since = (now() - parse_ts(last[-1]["ts"])).total_seconds() / 3600 if last else 1e9
+    weak = len(last) >= int(q["min_runs"]) and rate < float(q["min_pass"])
+    return {"spec": spec, "runs": len(last), "pass_rate": round(rate, 2), "benched": weak and since < q["cooldown_hours"],
+            "last": last[-1]["ts"] if last else ""}
+
+
+def record_quality(spec: str, ok: bool, checked: bool = True, what: str = "") -> None:
+    append_jsonl(config.path("data", "quality.jsonl"), {"ts": now().isoformat(), "spec": spec, "ok": ok,
+                                                        "checked": checked, "what": what})
+
+
 def pick(tier: str) -> str:
+    """First usable model of the tier in config order; a model failing too many recent checks is benched for a
+    cool-down (then gets one trial run again), unless it is the tier's last option."""
     specs = config.load()["models"].get(tier) or ["claude:haiku"]
     specs = [specs] if isinstance(specs, str) else specs
-    return next((s for s in specs if available(s)), "claude:haiku")  # config order decides; see config.toml
+    usable = [s for s in specs if available(s)]
+    good = [s for s in usable if not quality(s)["benched"]]
+    return (good or usable or ["claude:haiku"])[0]
+
+
+def quality_report() -> str:
+    seen = {s for tier in config.load()["models"].values() for s in ([tier] if isinstance(tier, str) else tier)}
+    rows = [quality(s) for s in sorted(seen)]
+    rows = [r for r in rows if r["runs"]]
+    return "\n".join(f"{r['spec']}: {int(r['pass_rate'] * 100)}% of last {r['runs']} checked runs passed"
+                     f"{' — BENCHED (stronger model used until the cool-down ends)' if r['benched'] else ''}"
+                     for r in rows) or "No checked runs yet."
 
 
 def _cost(provider: str, model: str, data: dict, tin: int, tout: int) -> float:

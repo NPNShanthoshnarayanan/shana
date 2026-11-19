@@ -176,6 +176,8 @@ def render_md(r: dict) -> str:
     lines += ["", "## Proof checks"] + [f"- {'✅' if c['ok'] else '⚠️'} {c['what']}: {c['detail']}" for c in r["checks"]]
     if not r["checks"]:
         lines.append("- (no cross-check possible today)")
+    from shana import models
+    lines += ["", "## Model quality (checked runs)", *[f"- {x}" for x in models.quality_report().splitlines()]]
     lines += ["", "## Still open"] + [f"{i['n']}. {i['text']} ({i['date']})" for i in r["open_items"]]
     lines += ["", "## New issues"] + [f"- #{i['id']} {i['title']}" for i in r["new_issues"]]
     lines += ["", "## New memories to review (fix or delete in ~/Documents/shana/memory)"]

@@ -160,6 +160,10 @@ def poll() -> dict:
         _poll_budget(state)
     except Exception as e:  # noqa: BLE001
         log_error("monitor.budget", e)
+    try:
+        _poll_quality(state)
+    except Exception as e:  # noqa: BLE001
+        log_error("monitor.quality", e)
     for a, b, score in same_work_pairs(sessions, cfg["same_work_threshold"]):
         if _once(state, f"same:{min(a.id, b.id)}:{max(a.id, b.id)}:{now():%Y%m%d}"):
             notify.send("👥 Same work in two sessions?", f"{short(a.label, 60)}  ↔  {short(b.label, 60)}")
@@ -206,6 +210,16 @@ def _poll_budget(state: dict) -> None:
                 notify.send(f"💸 DeepInfra {text.split(' —')[0]}",
                             f"${b['spent']:.2f} of ${b['cap']:.2f} this month. {text.split('— ')[1]}.", priority="high")
             break
+
+
+def _poll_quality(state: dict) -> None:
+    """Ping once when a model is benched for failing its checks (pick() already moves its work to the next model)."""
+    from shana import models
+    specs = {s for t in config.load()["models"].values() for s in ([t] if isinstance(t, str) else t)}
+    for q in map(models.quality, sorted(specs)):
+        if q["benched"] and _once(state, f"benched:{q['spec']}:{q['last']}"):
+            notify.send(f"🪑 {q['spec']} benched", f"Passed only {int(q['pass_rate'] * 100)}% of its last {q['runs']} "
+                        "checked runs; its work goes to the next model in its tier until the cool-down ends.")
 
 
 def status_table(hours: int = 12) -> str:

@@ -66,6 +66,13 @@ in OpenCode and notes Shana's own problems as issues: wrong or unchecked answers
 skipped, things you had to repeat, confusing answers. Test and scratch folders are skipped, similar issues are merged,
 and at most 5 new issues are noted per run; you get a ping when it notes something. Run it by hand: `shana track`.
 
+The nightly run also counts, by code, replies that say "fixed/works/done" in a turn that ran no tool, and orders
+("fix it") you had to repeat. "fix it", "yes" or "go ahead" counts as approval: Shana acts in the same turn.
+
+**Model quality watch:** every checked run (orchestrator steps, tracker fixes) records pass/fail per model. A model
+below 60% of its last 10 checked runs is benched for 24 h: its work goes to the next model in its tier, you get a ping,
+then it gets one trial run again. See `shana_model_quality` and the nightly report.
+
 
 Shana's own errors, failed model checks (a model failing ≥30% of its steps in a day) and complaints it finds in your
 sessions become issues. Each night new issues get a fix plan by themselves and you get a ping; a fix runs only after

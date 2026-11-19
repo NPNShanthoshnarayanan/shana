@@ -103,16 +103,37 @@ def models_report(hours: int = 12) -> str:
 _CORRECTION = re.compile(r"\b(u r wrong|you are wrong|you're wrong|ur wrong|not correct|incorrect|wrong answer|"
                          r"dont assume|don't assume|no assumption|that is wrong|thats wrong|that's wrong)\b", re.I)
 _LABEL = re.compile(r"^\W*\[([^\]]{2,40})\]")
+_CLAIM = re.compile(r"\b(it works|works now|is working|now working|fixed|is done|all done|reliabl[ey]|verified|"
+                    r"applied|switched)\b", re.I)
+_ORDER = re.compile(r"\b(fix|do)\s+(it|that|this|all|them|#\d+)\b|^\W*(yes|go ahead|just do it)\W*$", re.I)
+
+
+def _text(d: dict) -> str:
+    return " ".join(p.get("text", "") for p in d.get("content", []) if p.get("type") == "text")
 
 
 def quality_signals(since) -> list[dict]:
-    """Real signals of bad answers: the user correcting Shana, or a reply naming a model it was not."""
+    """Real signals of bad answers: user corrections, false model labels, "works/fixed" claims in a turn that ran no
+    tool, and the user having to repeat an order."""
     found = []
     for s in sessions(since):
         if s.parent_id:
             continue
         msgs = _messages(s.id)
+        tools_in_turn, last_order = False, False
         for k, (t, d) in enumerate(msgs):
+            if t == "user":
+                order = bool(_ORDER.search(d.get("text", "")))
+                if order and last_order:
+                    found.append({"kind": "repeated-order", "session": s.title, "user": d.get("text", "")[:120]})
+                tools_in_turn, last_order = False, order
+            elif t == "assistant":
+                tools_in_turn |= any(p.get("type") == "tool" for p in d.get("content", []))
+                txt = _text(d)
+                claim = any(not re.search(r"\b(not|n't|never|no)\b[^.]{0,15}$", txt[:m.start()], re.I)
+                            for m in _CLAIM.finditer(txt[:200]))  # a "done" claim leads the reply
+                if claim and not tools_in_turn:
+                    found.append({"kind": "unproven-claim", "session": s.title, "said": _text(d)[:200]})
             if t == "user" and _CORRECTION.search(d.get("text", "")):
                 prev = next((x for tt, x in reversed(msgs[:k]) if tt == "assistant"), {})
                 said = " ".join(p.get("text", "") for p in prev.get("content", []) if p.get("type") == "text")

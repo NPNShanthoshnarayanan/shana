@@ -23,7 +23,8 @@ TOOLS = {
     "shana_open_close": ("Close open item by its number. how: done or drop.",
                          _s(number="integer", how={"type": "string", "enum": ["done", "drop"]})),
     "shana_issue_add": ("Record a problem with Shana ITSELF (a wrong answer it gave, its behaviour, UI, cost, missing "
-                        "feature). Never use it for bugs in other projects or tools.", _s(title="string", details="string")),
+                        "feature). Never use it for bugs in other projects or tools. fix_now=true when the user already said fix it: it is "
+                        "approved and the fix starts at once.", _s(title="string", details="string", fix_now="boolean")),
     "shana_issue_close": ("Close a Shana issue that is not needed (made by mistake, duplicate, not a Shana problem).",
                           _s(number="integer", reason="string")),
     "shana_set_model": ("Really change which model OpenCode uses for 'chat' (Shana), 'subagents' or 'explore'. Use a "
@@ -45,6 +46,7 @@ TOOLS = {
                          _s(job_id="string")),
     "shana_issue_approve": ("Approve the planned fix for a Shana issue and start fixing it in the background "
                             "(only after the user says yes).", _s(number="integer")),
+    "shana_model_quality": ("How often each model's work passed its checks, and which models are benched.", _s()),
     "shana_cost_today": ("Today's Claude tokens and Shana's extra model costs so far (fast estimate).", _s()),
 }
 
@@ -64,8 +66,12 @@ def call(name: str, a: dict) -> str:
         return f"RECEIPT: open item closed ({a.get('how', 'done')}): {text}" if text else "NOT DONE: no such open item."
     if name == "shana_issue_add":
         i, dup = tracker.add_or_match(a.get("title", ""), a.get("details", ""))
-        return (f"RECEIPT: same as existing issue #{dup['id']} ({dup['title']}); nothing new created." if dup
-                else f"RECEIPT: issue #{i['id']} created.")
+        got = i or dup
+        msg = (f"RECEIPT: same as existing issue #{dup['id']} ({dup['title']}); nothing new created." if dup
+               else f"RECEIPT: issue #{i['id']} created.")
+        if a.get("fix_now") and got and got.get("status") not in ("fixed", "closed"):
+            return msg + " " + call("shana_issue_approve", {"number": int(got["id"])})
+        return msg
     if name == "shana_issue_close":
         i = tracker.close(int(a.get("number", 0)), a.get("reason", ""))
         return f"RECEIPT: issue #{i['id']} closed: {a.get('reason', '')}" if i else "NOT DONE: no such issue."
@@ -106,6 +112,9 @@ def call(name: str, a: dict) -> str:
         return (f"RECEIPT: issue #{n} approved; the fix runs in the background. It counts as fixed only when the tests "
                 "pass AND the issue's own check proves the problem is gone; the user gets a ping with the result. "
                 "It is NOT fixed yet.")
+    if name == "shana_model_quality":
+        from shana import models
+        return models.quality_report()
     if name == "shana_cost_today":
         from shana import budget
         day = now().date()

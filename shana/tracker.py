@@ -153,11 +153,15 @@ def fix(n: int) -> dict | None:
     i = get(n)
     if not i or i.get("status") != "approved":
         return i
+    if "## Plan" not in i.get("body", "") and not re.search(r"^Check: ", i.get("body", ""), re.M):
+        # approved straight from chat ("fix it"): plan first so the fix has a check, then fix
+        plan(n)
+        i = set_status(n, "approved")
     check = _check_cmd(i)
     shell = (lambda: run(["/bin/sh", "-c", check], cwd=config.home(), timeout=600)) if not check.startswith("manual") else None
     before = shell() if shell else None
-    res = models.run(models.pick("mid"), fix_prompt(i), cwd=config.home(), agent=True, timeout=1800,
-                     label=f"issue-{n}-fix")
+    spec = models.pick("mid")
+    res = models.run(spec, fix_prompt(i), cwd=config.home(), agent=True, timeout=1800, label=f"issue-{n}-fix")
     tests = run(["python3", "-m", "unittest", "discover", "-s", "tests", "-q"], cwd=config.home(), timeout=600)
     after = shell() if shell else None
     tests_ok = res.ok and tests.returncode == 0
@@ -175,6 +179,8 @@ def fix(n: int) -> dict | None:
     note = (f"## Result ({now():%Y-%m-%d %H:%M}) → {status}: {why}\n{short(res.text or res.error, 600)}\n\n"
             f"Tests: {'passed' if tests.returncode == 0 else 'FAILED'}\nCheck: {check}\n```\n{tail}\n```")
     out = set_status(n, status, note)
+    if shell is not None or not tests_ok:
+        models.record_quality(spec, status == "fixed", True, f"issue #{n} fix")
     if status == "fixed":
         run(["git", "add", "-A"], cwd=config.home())
         run(["git", "commit", "-qm", f"🐛 fix(#{n}): {short(i['title'], 60)}"], cwd=config.home())

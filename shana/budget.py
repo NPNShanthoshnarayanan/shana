@@ -70,7 +70,8 @@ def refresh() -> dict:
 def summary(b: dict | None = None) -> str:
     b = b or month()
     lines = [f"DeepInfra {b['month']}: ${b['spent']:.3f} of ${b['cap']:.2f} cap, ${b['left']:.3f} left "
-             f"(Shana's count from real per-message costs; the DeepInfra dashboard is the final word)"]
+             f"(Shana's count from real per-message costs). The exact account balance cannot be read with this key "
+             f"(no billing access); it is on https://deepinfra.com/dash/billing"]
     lines += [f"  {m}: ${c:.4f}" for m, c in b["by_model"].items()]
     return "\n".join(lines)
 
@@ -78,7 +79,7 @@ def summary(b: dict | None = None) -> str:
 def write_live() -> str:
     """A short block of real facts the OpenCode plugin adds to every request (so even small models answer right)."""
     import json as _json
-    from shana import memory, tracker
+    from shana import memory, models, tracker
     jobs = []
     for p in sorted(config.path("tasks").glob("*/job.json"), reverse=True)[:3]:
         j = _json.loads(p.read_text())
@@ -86,8 +87,10 @@ def write_live() -> str:
     b = month()
     check = [f"#{i['id']} {i['title'][:50]}" for i in tracker.list_issues("needs-check")]
     lines = [f"Background jobs (newest first): {'; '.join(jobs) or 'none yet'}",
-             f"DeepInfra this month: ${b['spent']:.2f} of ${b['cap']:.2f} cap",
+             f"DeepInfra this month: ${b['spent']:.2f} of ${b['cap']:.2f} cap (Shana's count). The exact account "
+             "balance cannot be read with Shana's key; it is on https://deepinfra.com/dash/billing",
              f"Open items waiting: {len(memory.open_items())}",
+             "Model check pass rates: " + models.quality_report().replace("\n", "; "),
              f"Issues waiting for the user to check: {', '.join(check) or 'none'}"]
     text = "\n".join(lines)
     config.path("data", "live.txt").write_text(text)

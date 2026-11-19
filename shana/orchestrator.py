@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Callable
 
 from shana import config, memory, models
-from shana.util import append_jsonl, now, run, short
+from shana.util import now, run, short
 
 PLAN_PROMPT = """Split this task into small steps (max 8) that a coding agent can do one at a time.
 Each step starts with no memory of earlier steps except a short notes file, so make each goal self-contained.
@@ -83,8 +83,7 @@ def run_task(task: str, cwd: str, check: str = "", budget: float | None = None,
             chk = step.get("check") or (check if i == len(steps) else "")  # the task's own check runs at the end
             if ok and chk:
                 ok, failure = checker(chk, cwd, cfg["check_timeout_s"])
-            append_jsonl(config.path("data", "quality.jsonl"), {"ts": now().isoformat(), "spec": spec, "ok": ok,
-                                                                "checked": bool(chk)})
+            models.record_quality(spec, ok, bool(chk), f"step {i}: {short(step['goal'], 60)}")
             with notes.open("a") as fh:
                 fh.write(f"\n### Step {i} · {spec} · {'ok' if ok else 'failed'} · ${res.cost_usd:.3f}\n"
                          f"{(res.text or res.error).strip()[:1200]}\n")

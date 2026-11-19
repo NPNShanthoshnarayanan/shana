@@ -44,6 +44,7 @@ DEFAULTS: dict = {
         "deepinfra": {"base_url": "https://api.deepinfra.com/anthropic", "key_env": "DEEPINFRA_API_KEY",
                       "price_in": 0.0, "price_out": 0.0, "prices": {}, "monthly_cap_usd": 3.0},
     },
+    "quality": {"window": 10, "min_runs": 5, "min_pass": 0.6, "cooldown_hours": 24},
     "orchestrator": {"budget_usd": 2.0, "max_escalations": 2, "step_timeout_s": 900, "check_timeout_s": 600},
 }
 

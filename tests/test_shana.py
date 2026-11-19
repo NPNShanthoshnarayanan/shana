@@ -408,6 +408,7 @@ class OpenCodeWorkerQuality(unittest.TestCase):
 
     def test_quality_issue_and_auto_plan(self):
         from shana.util import append_jsonl
+        config.path("data", "quality.jsonl").unlink(missing_ok=True)  # other tests' fix runs record quality too
         for ok in (False, False, True):
             append_jsonl(config.path("data", "quality.jsonl"), {"ts": now().isoformat(), "spec": "x:bad", "ok": ok})
         self.assertEqual(tracker.from_quality(now().date()), 1)
@@ -538,6 +539,70 @@ class HonestyFixes(unittest.TestCase):
         self.assertTrue(r.startswith("RECEIPT"))
         self.assertIn('chat = "deepinfra/deepseek-ai/DeepSeek-V4-Flash"', config.path("config.toml").read_text())
 
+
+
+class OpenIssueFixes(unittest.TestCase):
+    def _db(self, name: str, msgs: list) -> Path:
+        import sqlite3
+        db = Path(TMP, name)
+        db.unlink(missing_ok=True)
+        con = sqlite3.connect(db)
+        con.execute("create table session_v2 (id, title, parent_id, directory, cost, tokens_input, tokens_output, "
+                    "tokens_cache_read, tokens_cache_write, time_created, time_updated, time_busy, time_idle, idle_outcome)")
+        con.execute("create table session_message (id, session_id, type, seq, time_created, data)")
+        t = int(now().timestamp() * 1000)
+        con.execute("insert into session_v2 values ('s','Chat',null,'/x',0,0,0,0,0,?,?,?,?,'')", (t, t, t, t))
+        for k, (typ, d) in enumerate(msgs):
+            con.execute("insert into session_message values (?,?,?,?,?,?)", (f"m{k}", "s", typ, k, t, json.dumps(d)))
+        con.commit()
+        con.close()
+        return db
+
+    def test_unproven_claims_and_repeated_orders_are_found(self):
+        from shana import opencode
+        say = lambda text, tool=False: ("assistant", {"model": {"id": "x"}, "content": [{"type": "text", "text": text}]  # noqa: E731
+                                        + ([{"type": "tool"}] if tool else [])})
+        db = self._db("oc-claims.db", [
+            ("user", {"text": "fix it"}), say("Done. It works now."),                 # claim, no tool: flagged
+            ("user", {"text": "fix it now"}), say("Ran the test.", tool=True), say("Fixed, the test passed."),
+            ("user", {"text": "status?"}), say("It is not fixed yet.")])             # negated: not flagged
+        cfg = config.load()
+        cfg["opencode"] = {"db": str(db)}
+        with mock.patch.object(config, "load", return_value=cfg):
+            kinds = [x["kind"] for x in opencode.quality_signals(now() - timedelta(hours=1))]
+        self.assertEqual(kinds.count("unproven-claim"), 1)
+        self.assertEqual(kinds.count("repeated-order"), 1)
+
+    def test_issue_add_fix_now_approves_and_starts_fix(self):
+        with mock.patch("subprocess.Popen") as popen:
+            out = mcp_server.call("shana_issue_add", {"title": "Kept asking permission after an order xyz",
+                                                      "fix_now": True})
+        self.assertIn("approved", out)
+        self.assertEqual(popen.call_count, 1)
+        n = int(out.split("#")[1].split()[0])
+        self.assertEqual(tracker.get(n)["status"], "approved")
+
+    def test_balance_answer_names_the_dashboard(self):
+        from shana import budget
+        self.assertIn("deepinfra.com/dash/billing", budget.summary())
+
+    def test_weak_model_is_benched_then_gets_a_trial(self):
+        from shana import models
+        cfg = config.load()
+        cfg["models"]["cheap"] = ["claude:haiku", "claude:sonnet"]
+        q = config.path("data", "quality.jsonl")
+        q.unlink(missing_ok=True)
+        with mock.patch.object(config, "load", return_value=cfg), mock.patch.object(models, "available", return_value=True):
+            self.assertEqual(models.pick("cheap"), "claude:haiku")
+            for ok in (False, False, True, False, False):
+                models.record_quality("claude:haiku", ok)
+            self.assertTrue(models.quality("claude:haiku")["benched"])
+            self.assertEqual(models.pick("cheap"), "claude:sonnet")
+            self.assertIn("BENCHED", models.quality_report())
+            later = now() + timedelta(hours=25)
+            with mock.patch("shana.models.now", return_value=later):
+                self.assertEqual(models.pick("cheap"), "claude:haiku")  # cool-down over: one trial run
+        q.unlink(missing_ok=True)
 
 if __name__ == "__main__":
     unittest.main()
