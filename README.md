@@ -43,6 +43,22 @@ and Shana's tools are loaded, the chat runs on the `mid` model, subagents on the
 a child session you can open. Hard steps go to `shana_worker`, which runs Claude through your Claude subscription in
 the background (OpenCode itself can only use Claude with an API key). Shana adds about 1,300 tokens per request.
 
+## Honest by design
+
+- **Real model names.** Shana's OpenCode plugin (`opencode-plugin/shana`) tells every model call which model it
+  really is, taken from the request itself, so replies never claim the wrong model. Workers are tagged by code.
+  `shana_models_used` reads the real model of every session and subagent from OpenCode's database.
+- **Receipts, not words.** Tools that change something return a `RECEIPT:` line (or `NOT DONE:`); Shana must quote
+  it. Real actions exist for what it used to only promise: `shana_set_model`, `shana_issue_close`, `shana_jobs`.
+- **Live facts.** The plugin adds a short real-data block (latest jobs, DeepInfra spend, items waiting) to each
+  request, so even small models answer from facts.
+- **Proven fixes.** Each planned issue gets a check that fails now and must pass after the fix. Only then is it
+  `fixed` (and committed); otherwise `approved` (still broken) or `needs-check` (you try it). You get a ping either way.
+- **Budget.** `shana_budget` counts real DeepInfra spend this month (OpenCode + Shana) against `monthly_cap_usd`.
+  At 80% OpenCode steps down to the cheapest model; at the cap Shana's own work moves to Claude.
+- **Bad answers found automatically.** Each night, your corrections ("you are wrong", "don't assume") and replies
+  that named the wrong model become issues by themselves.
+
 ## Self-improving
 
 Shana's own errors, failed model checks (a model failing ≥30% of its steps in a day) and complaints it finds in your

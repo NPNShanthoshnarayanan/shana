@@ -16,7 +16,7 @@ os.environ["SHANA_HOME"] = TMP
 os.environ.pop("SHANA_INTERNAL", None)
 LOGS = Path(TMP, "claude-logs")
 Path(TMP, "config.toml").write_text(
-    f'[notify]\nmac = false\n[logs]\nclaude = "{LOGS}"\n[logs.other]\n')
+    f'[notify]\nmac = false\n[logs]\nclaude = "{LOGS}"\n[logs.other]\n[opencode]\ndb = "{TMP}/no-opencode.db"\n')
 
 from shana import config, logs, memory, monitor, orchestrator, proof, report, topics, tracker  # noqa: E402
 from shana import install, mcp_server  # noqa: E402
@@ -88,6 +88,33 @@ class LogsAndMonitor(unittest.TestCase):
         self.assertEqual(monitor.status_of(stuck, 15), "stuck")
         self.assertEqual(monitor.status_of(done, 15), "finished")
 
+    def test_tool_loop_detection(self):
+        # Build a session with 25 consecutive Bash calls — simulates a vLLM doom loop
+        # All timestamps are recent (< 5 min ago) so only the loop threshold matters
+        entries = [user("run the pipeline", 4)]
+        for i in range(25):
+            entries.append(assistant(4 - i * 0.05, tool="Bash", mid=f"m{i}"))
+            entries.append(tool_result(4 - i * 0.05 - 0.02))
+        # Session is still mid-loop (last_kind = tool_result), not finished
+        s = logs.read_claude(write_session("loop1", entries))
+        self.assertEqual(s.max_consecutive_same_tool, 25)
+        self.assertEqual(s.dominant_tool, "Bash")
+        self.assertEqual(monitor.status_of(s, 15, loop_threshold=20), "looping")
+        # Below threshold: should be running, not looping
+        self.assertEqual(monitor.status_of(s, 15, loop_threshold=30), "running")
+
+    def test_no_loop_on_mixed_tools(self):
+        entries = [user("mixed work", 4)]
+        for i in range(10):
+            entries.append(assistant(4 - i * 0.1, tool="Bash", mid=f"b{i}"))
+            entries.append(tool_result(4 - i * 0.1 - 0.05))
+            entries.append(assistant(4 - i * 0.1 - 0.03, tool="Read", mid=f"r{i}"))
+            entries.append(tool_result(4 - i * 0.1 - 0.08))
+        # Still mid-work (last entry is tool_result)
+        s = logs.read_claude(write_session("mixed1", entries))
+        self.assertLess(s.max_consecutive_same_tool, 3)
+        self.assertEqual(monitor.status_of(s, 15, loop_threshold=20), "running")
+
     def test_same_work_pairs_skip_forks(self):
         a = logs.read_claude(write_session("w1", [{"type": "custom-title", "customTitle": "A"},
                                                   user("train qwen lora adapter modal budget", 2)]))
@@ -157,6 +184,11 @@ class MemoryTopicsProof(unittest.TestCase):
 
 
 class TrackerOrchestratorReport(unittest.TestCase):
+    def test_fix_prompt_is_global(self):
+        text = tracker.fix_prompt({"id": 1, "title": "t", "body": "b"})
+        self.assertIn(str(config.path("agents", "shana.md")), text)
+        self.assertIn("GLOBAL", text)
+
     def test_tracker_flow_and_errors(self):
         i = tracker.add("Report shows wrong total", "seen today")
         self.assertIsNone(tracker.add("Report shows wrong total"))
@@ -216,6 +248,22 @@ class TrackerOrchestratorReport(unittest.TestCase):
 
 
 class McpAndInstall(unittest.TestCase):
+    def test_deepinfra_breakdown(self):
+        from shana.util import append_jsonl
+        led = config.path("data", "ledger.jsonl")
+        before = led.read_text() if led.exists() else ""
+        self.addCleanup(led.write_text, before)  # shared temp home: don't leak into other tests
+        for spec, prov, c, i, o in [("deepinfra:qwen", "deepinfra", 0.5, 100, 50), ("deepinfra:qwen", "deepinfra", 0.25, 10, 5),
+                                    ("claude:haiku", "claude", 0, 7, 3)]:
+            append_jsonl(config.path("data", "ledger.jsonl"), {"ts": now().isoformat(), "spec": spec, "provider": prov,
+                         "cost_usd": c, "tokens_in": i, "tokens_out": o})
+        d = report.deepinfra_month(now().date())["by_model"]["qwen"]
+        self.assertEqual((d["calls"], d["tokens_in"]), (2, 110))
+        r = report.deepinfra_month(now().date())
+        self.assertGreaterEqual(r["total"], 0.75)
+        self.assertGreaterEqual(r["claude_pro"]["tokens"], 10)
+        self.assertIn("cap", mcp_server.call("shana_cost_today", {}))
+
     def test_mcp_roundtrip(self):
         msgs = [{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18"}},
                 {"jsonrpc": "2.0", "method": "notifications/initialized"},
@@ -246,6 +294,12 @@ class McpAndInstall(unittest.TestCase):
         self.assertEqual(data["hooks"], {"Stop": [{"hooks": [{"type": "command", "command": "other"}]}]})
 
 
+class ModelTag(unittest.TestCase):
+    def test_tagged_shows_model(self):
+        self.assertTrue(Result(True, "hi", "claude:sonnet").tagged().startswith("[Claude sonnet · Pro] hi"))
+        self.assertEqual(Result(True, "hi", "deepseek:v4").tagged(), "[v4] hi")
+
+
 class Prices(unittest.TestCase):
     def test_per_model_price_wins_over_provider_price(self):
         from shana import models
@@ -255,6 +309,45 @@ class Prices(unittest.TestCase):
             self.assertAlmostEqual(models._cost("deepinfra", "m-cheap", {}, 1_000_000, 1_000_000), 0.8)
             self.assertEqual(models._cost("deepinfra", "other", {}, 1_000_000, 0), 0.0)
             self.assertEqual(models._cost("claude", "haiku", {"total_cost_usd": 0.5}, 9, 9), 0.5)
+
+    def test_pick_follows_config_order_and_skips_deepinfra_at_cap(self):
+        from shana import budget, models
+        cfg = config.load()
+        cfg["models"]["cheap"] = ["deepinfra:deepseek-ai/DeepSeek-V4.1-Flash", "claude:haiku"]
+        cfg["providers"]["deepinfra"]["monthly_cap_usd"] = 1.0
+        with mock.patch.object(config, "load", return_value=cfg), \
+                mock.patch.object(config, "secret", return_value="k"), \
+                mock.patch.object(models, "claude_bin", return_value=sys.executable):
+            with mock.patch.object(budget, "opencode_spend", return_value={"m": 0.10}):
+                self.assertTrue(models.pick("cheap").startswith("deepinfra:"))
+            with mock.patch.object(budget, "opencode_spend", return_value={"m": 0.99}):
+                self.assertEqual(models.pick("cheap"), "claude:haiku")
+
+    def test_pick_falls_back_to_api_when_claude_unavailable(self):
+        from shana import models
+        cfg = config.load()
+        cfg["models"]["cheap"] = ["claude:haiku", "deepinfra:deepseek-ai/DeepSeek-V4.1-Flash"]
+        original_available = models.available
+        def fake_available(spec):
+            if spec == "deepinfra:deepseek-ai/DeepSeek-V4.1-Flash":
+                return True
+            if spec == "claude:haiku":
+                return False  # Claude binary missing
+            return original_available(spec)
+        with mock.patch.object(config, "load", return_value=cfg), \
+             mock.patch.object(models, "available", fake_available):
+            self.assertIn("deepinfra", models.pick("cheap"))
+
+    def test_pick_returns_claude_haiku_when_nothing_available(self):
+        from shana import models
+        cfg = config.load()
+        cfg["models"]["cheap"] = ["deepinfra:deepseek-ai/DeepSeek-V4.1-Flash"]
+        original_available = models.available
+        def fake_available(spec):
+            return False  # Nothing available
+        with mock.patch.object(config, "load", return_value=cfg), \
+             mock.patch.object(models, "available", fake_available):
+            self.assertEqual(models.pick("cheap"), "claude:haiku")
 
 
 class OpenCodeWorkerQuality(unittest.TestCase):
@@ -305,6 +398,13 @@ class OpenCodeWorkerQuality(unittest.TestCase):
             done = worker.run(job["id"])
         self.assertEqual(done["status"], "done")
         self.assertIn("claude --resume sid-1", worker.status(job["id"]))
+        self.assertIn("claude:opus (Claude Pro, $0 marginal)", worker.status(job["id"]))
+        self.assertIn("paid API", worker.billing("deepinfra:x"))
+
+    def test_worker_label_comes_from_the_model_started(self):
+        from shana import models
+        self.assertEqual(models.tag("claude:sonnet"), "[Claude sonnet · Pro]")
+        self.assertEqual(models.tag("deepinfra:deepseek-ai/DeepSeek-V4.1-Flash"), "[DeepSeek V4.1 Flash]")
 
     def test_quality_issue_and_auto_plan(self):
         from shana.util import append_jsonl
@@ -327,6 +427,87 @@ class OpenCodeWorkerQuality(unittest.TestCase):
         self.assertIn("shana", d["mcp"]["servers"])
         self.assertIn("other", d["mcp"])
         self.assertEqual(len([i for i in d["instructions"] if i.endswith("core.md")]), 1)
+
+
+
+class HonestyFixes(unittest.TestCase):
+    def test_issue_dedupe_and_close(self):
+        a, _ = tracker.add_or_match("Model label shows wrong model in replies")
+        b, dup = tracker.add_or_match("Replies show wrong model label")
+        self.assertIsNone(b)
+        self.assertEqual(dup["id"], a["id"])
+        self.assertEqual(tracker.close(int(a["id"]), "duplicate")["status"], "closed")
+
+    def _fix(self, check: str, before_rc: int, after_rc: int, tests_rc: int = 0) -> str:
+        i = tracker.add(f"Fix case {check} {before_rc}{after_rc}{tests_rc}")
+        tracker.set_status(int(i["id"]), "approved", f"Check: {check}")
+        rcs = iter([before_rc, tests_rc, after_rc] if not check.startswith("manual") else [tests_rc])
+        fake_run = lambda cmd, **k: mock.Mock(returncode=0 if cmd[0] == "git" else next(rcs), stdout="", stderr="")  # noqa: E731
+        with mock.patch("shana.tracker.run", fake_run), \
+                mock.patch("shana.models.run", return_value=Result(True, "changed x", "claude:sonnet")):
+            return tracker.fix(int(i["id"]))["status"]
+
+    def test_fixed_only_when_check_proves_it(self):
+        self.assertEqual(self._fix("false-then-true", 1, 0), "fixed")
+        self.assertEqual(self._fix("still-broken", 1, 1), "approved")
+        self.assertEqual(self._fix("proves-nothing", 0, 0), "needs-check")
+        self.assertEqual(self._fix("manual: open a new chat and look", 0, 0), "needs-check")
+        self.assertEqual(self._fix("tests-fail", 1, 0, tests_rc=1), "approved")
+
+    def test_job_lookup_latest_and_partial(self):
+        from shana import worker
+        job = worker.start("look up jobs", TMP, "claude:sonnet", launcher=lambda c: None)
+        self.assertIn(job["id"], worker.status("latest"))
+        self.assertIn(job["id"], worker.status(job["id"][-10:]))
+        self.assertEqual(worker.status("no-such-job-xyz"), "No such job.")
+        self.assertIn(job["id"], worker.list_jobs())
+
+    def test_quality_signals_find_corrections_and_false_labels(self):
+        import sqlite3
+        from shana import opencode
+        db = Path(TMP, "oc-q.db")
+        db.unlink(missing_ok=True)
+        con = sqlite3.connect(db)
+        con.execute("create table session_v2 (id, title, parent_id, directory, cost, tokens_input, tokens_output, "
+                    "tokens_cache_read, tokens_cache_write, time_created, time_updated, time_busy, time_idle, idle_outcome)")
+        con.execute("create table session_message (id, session_id, type, seq, time_created, data)")
+        t = int(now().timestamp() * 1000)
+        con.execute("insert into session_v2 values ('s','Chat',null,'/x',0,0,0,0,0,?,?,?,?,'')", (t, t, t, t))
+        msgs = [("assistant", {"model": {"id": "deepseek-ai/DeepSeek-V4-Pro"}, "content": [{"type": "text", "text": "`[DeepSeek V3.2]` Qwen is text only"}]}),
+                ("user", {"text": "no u r wrong qwen can see images"}),
+                ("assistant", {"model": {"id": "deepseek-ai/DeepSeek-V4-Flash"}, "content": [{"type": "text", "text": "[DeepSeek V4 Flash] ok"}]})]
+        for k, (typ, d) in enumerate(msgs):
+            con.execute("insert into session_message values (?,?,?,?,?,?)", (f"m{k}", "s", typ, k, t, json.dumps(d)))
+        con.commit()
+        con.close()
+        cfg = config.load()
+        cfg["opencode"] = {"db": str(db)}
+        with mock.patch.object(config, "load", return_value=cfg):
+            sig = opencode.quality_signals(now() - timedelta(hours=1))
+            report_text = opencode.models_report(2)
+        kinds = [x["kind"] for x in sig]
+        self.assertEqual(kinds.count("false-model-label"), 1)
+        self.assertEqual(kinds.count("user-correction"), 1)
+        self.assertIn("DeepSeek-V4-Pro ×1", report_text)
+
+    def test_live_status_has_real_jobs_and_budget(self):
+        from shana import budget, worker
+        worker.start("live block job", TMP, "claude:sonnet", launcher=lambda c: None)
+        text = budget.write_live()
+        self.assertIn("live-block-job", text)
+        self.assertIn("cap", text)
+        self.assertEqual(config.path("data", "live.txt").read_text(), text)
+
+    def test_set_model_gives_receipt_and_refuses_unknown(self):
+        from shana import opencode
+        f = Path(TMP, "oc-set.json")
+        with mock.patch.object(install, "OPENCODE_CONFIG", f), \
+                mock.patch.object(opencode, "provider_models", return_value={"deepseek-ai/DeepSeek-V4-Flash"}), \
+                mock.patch("shana.install.setup_opencode", lambda *a, **k: "ok"):
+            self.assertTrue(install.set_opencode_model("chat", "nope/model").startswith("NOT DONE"))
+            r = install.set_opencode_model("chat", "deepseek-ai/DeepSeek-V4-Flash")
+        self.assertTrue(r.startswith("RECEIPT"))
+        self.assertIn('chat = "deepinfra/deepseek-ai/DeepSeek-V4-Flash"', config.path("config.toml").read_text())
 
 
 if __name__ == "__main__":

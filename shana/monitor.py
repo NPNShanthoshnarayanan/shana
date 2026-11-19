@@ -42,12 +42,14 @@ def _once(state: dict, key: str) -> bool:
     return True
 
 
-def status_of(s: logs.Session, stuck_minutes: int) -> str:
+def status_of(s: logs.Session, stuck_minutes: int, loop_threshold: int = 20) -> str:
     if s.tool != "claude":
         last = s.last_time or s.mtime
         return "active" if last and now() - last < timedelta(minutes=3) else "idle"
     if s.last_kind in ("text", "interrupted") or not s.last_kind:
         return "waiting" if s.pending_ask else "finished"
+    if s.max_consecutive_same_tool >= loop_threshold:
+        return "looping"
     last = s.last_time or s.mtime
     if last and now() - last >= timedelta(minutes=stuck_minutes):
         return "stuck"
@@ -83,7 +85,7 @@ def _record(state: dict, s: logs.Session, status: str) -> None:
 
 
 def _ping_finished(state: dict, s: logs.Session, cfg: dict) -> None:
-    status = status_of(s, cfg["stuck_minutes"])
+    status = status_of(s, cfg["stuck_minutes"], cfg.get("loop_threshold", 20))
     _record(state, s, status)
     if status not in ("waiting", "finished") or not s.last_time:
         return
@@ -133,13 +135,17 @@ def poll() -> dict:
     hooks_quiet = not state.get("hooks_seen") or now() - parse_ts(state["hooks_seen"]) > timedelta(hours=24)
     sessions = [s for s in logs.claude_sessions(since, tail_bytes=400_000) if not s.internal]
     for s in sessions:
-        status = status_of(s, cfg["stuck_minutes"])
+        status = status_of(s, cfg["stuck_minutes"], cfg.get("loop_threshold", 20))
         prev = state["sessions"].get(s.id, {})
         if prev.get("status") == "waiting" and prev.get("last") == (s.last_time or s.mtime or now()).isoformat():
             status = "waiting"  # a hook said it waits for you (e.g. a permission prompt); nothing moved since
         if status == "stuck" and _once(state, f"stuck:{s.id}:{s.last_time}"):
             mins = int((now() - (s.last_time or s.mtime)).total_seconds() // 60)
             notify.send(f"🔴 {short(s.label, 50)}: stuck?", f"No progress for {mins} min.", priority="high")
+        if status == "looping" and _once(state, f"loop:{s.id}:{s.last_time}"):
+            notify.send(f"🔁 {short(s.label, 50)}: tool loop detected",
+                        f"Repeated {s.dominant_tool} × {s.max_consecutive_same_tool} — possible model doom loop.",
+                        priority="high")
         if hooks_quiet and status != "waiting":
             _ping_finished(state, s, cfg)
         else:
@@ -150,6 +156,10 @@ def poll() -> dict:
         _poll_opencode(state, since, cfg)
     except Exception as e:  # noqa: BLE001
         log_error("monitor.opencode", e)
+    try:
+        _poll_budget(state)
+    except Exception as e:  # noqa: BLE001
+        log_error("monitor.budget", e)
     for a, b, score in same_work_pairs(sessions, cfg["same_work_threshold"]):
         if _once(state, f"same:{min(a.id, b.id)}:{max(a.id, b.id)}:{now():%Y%m%d}"):
             notify.send("👥 Same work in two sessions?", f"{short(a.label, 60)}  ↔  {short(b.label, 60)}")
@@ -184,13 +194,27 @@ def _poll_opencode(state: dict, since, cfg: dict) -> None:
             notify.send(f"✅ {short(s.title, 50)}: finished", f"OpenCode · {s.outcome or 'done'} · ${s.cost:.3f}")
 
 
+def _poll_budget(state: dict) -> None:
+    """Keep data/budget.json fresh for the OpenCode plugin and ping once at 80% and at 100% of the monthly cap."""
+    from shana import budget
+    b = budget.refresh()
+    budget.write_live()
+    for level, text in ((1.0, "cap reached — Shana's own work moves to Claude; OpenCode chat uses the cheapest model"),
+                        (0.8, "80% used — OpenCode switched to the cheapest model")):
+        if b["share"] >= level:
+            if _once(state, f"budget:{b['month']}:{level}"):
+                notify.send(f"💸 DeepInfra {text.split(' —')[0]}",
+                            f"${b['spent']:.2f} of ${b['cap']:.2f} this month. {text.split('— ')[1]}.", priority="high")
+            break
+
+
 def status_table(hours: int = 12) -> str:
     state = load_state()
     cutoff = (now() - timedelta(hours=hours)).isoformat()
     rows = sorted((v for v in state["sessions"].values() if v["last"] >= cutoff), key=lambda v: v["last"], reverse=True)
     if not rows:
         return "No sessions in the last %d hours." % hours
-    icon = {"running": "🔵", "waiting": "🟡", "finished": "✅", "stuck": "🔴", "active": "🔵", "idle": "⚪"}
+    icon = {"running": "🔵", "waiting": "🟡", "finished": "✅", "stuck": "🔴", "looping": "🔁", "active": "🔵", "idle": "⚪"}
     lines = [f"{icon.get(r['status'], '•')} {r['status']:<8} {parse_ts(r['last']):%H:%M}  {r['tool']:<6} "
              f"{short(r['title'], 55)}  [{r['project']}]" for r in rows]
     return "\n".join(lines)

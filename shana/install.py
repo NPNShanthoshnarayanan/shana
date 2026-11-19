@@ -140,29 +140,75 @@ def setup_phone() -> str:
 OPENCODE_CONFIG = Path.home() / ".config" / "opencode" / "opencode.json"
 
 
+OPENCODE_DEFAULTS = {
+    "chat": "deepinfra/deepseek-ai/DeepSeek-V4.1-Flash",      # Shana's own chat: cheap but capable
+    "subagent": "deepinfra/deepseek-ai/DeepSeek-V4.1-Flash",  # task/general subagents
+    "explore": "deepinfra/deepseek-ai/DeepSeek-V4-Flash",     # read-only searches: cheapest
+    "budget_step_down": "deepseek-ai/DeepSeek-V4-Flash",       # used for everything once 80% of the cap is spent
+}
+
+
 def setup_opencode(path: Path = OPENCODE_CONFIG) -> str:
-    """Make Shana OpenCode's default agent (memory + tools loaded), cheap models for subagents; keeps other settings."""
-    from shana import models
+    """Make Shana OpenCode's default agent with real-model labels and a budget step-down; keeps other settings."""
+    oc = {**OPENCODE_DEFAULTS, **config.load().get("opencode", {})}
     data = json.loads(path.read_text()) if path.exists() else {}
-    tier = lambda t: models.pick(t).replace(":", "/", 1) if not models.pick(t).startswith("claude:") else None  # noqa: E731
     data.setdefault("$schema", "https://opencode.ai/config.json")
     data["default_agent"] = "shana"
+    data["model"] = oc["subagent"]
+    sub_prompt = "{file:" + str(config.path("agents", "subagent.md")) + "}"
     agents = data.setdefault("agent", {})
     agents["shana"] = {"mode": "primary", "description": "Shana — your assistant; delegates work to subagents",
-                       "prompt": "{file:" + str(config.path("agents", "shana.md")) + "}",
-                       **({"model": tier("mid")} if tier("mid") else {})}
-    if tier("cheap"):
-        agents.setdefault("general", {})["model"] = tier("cheap")
-        data["model"] = tier("cheap")
+                       "prompt": "{file:" + str(config.path("agents", "shana.md")) + "}", "model": oc["chat"]}
+    agents.setdefault("general", {}).update(model=oc["subagent"], prompt=sub_prompt)
+    agents.setdefault("explore", {}).update(model=oc["explore"], prompt=sub_prompt)
     core = str(config.path("memory", "core.md"))
     data["instructions"] = [i for i in data.get("instructions", []) if i != core] + [core]
     mcp = data.setdefault("mcp", {})
     mcp.pop("shana", None)
     mcp.setdefault("servers", {})["shana"] = {"type": "local", "command": [bin_path(), "mcp"], "enabled": True}
+    plugin_dir = str(config.path("opencode-plugin", "shana"))
+    plugins = [p for p in data.get("plugins", []) if not (isinstance(p, dict) and p.get("package") == plugin_dir)
+               and p != plugin_dir]
+    plugins.append({"package": plugin_dir, "options": {"budget": str(config.path("data", "budget.json")),
+                                                        "cheap": oc["budget_step_down"], "downgradeAt": 0.8}})
+    data["plugins"] = plugins
     key = config.path("data", "deepinfra.key")
     if key.exists():
         data.setdefault("provider", {}).setdefault("deepinfra", {}).setdefault("options", {})["apiKey"] = \
             "{file:" + str(key) + "}"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2) + "\n")
-    return f"OpenCode: default agent 'shana' set in {path}"
+    return (f"OpenCode updated in {path}: default agent shana (chat {oc['chat']}), subagents {oc['subagent']}, "
+            f"explore {oc['explore']}, plugin {plugin_dir}")
+
+
+def set_opencode_model(target: str, model: str) -> str:
+    """Really change an OpenCode model (saved in config.toml [opencode], then applied); returns a receipt."""
+    key = {"chat": "chat", "subagents": "subagent", "explore": "explore"}.get(target)
+    model = model.strip()
+    if not key or not model:
+        return "NOT DONE: target must be chat, subagents or explore, and a model id is needed."
+    full = model if model.startswith("deepinfra/") else f"deepinfra/{model}"
+    from shana import budget, opencode
+    known = opencode.provider_models("deepinfra")
+    if known and full.split("/", 1)[1] not in known:
+        return f"NOT DONE: {model} is not a DeepInfra model OpenCode knows. Examples: {', '.join(sorted(known)[:6])}"
+    old = {**OPENCODE_DEFAULTS, **config.load().get("opencode", {})}[key]
+    cfg = config.path("config.toml")
+    text = cfg.read_text() if cfg.exists() else ""
+    import re
+    if "[opencode]" not in text:
+        text += "\n[opencode]\n"
+    block_start = text.index("[opencode]")
+    head, tail = text[:block_start], text[block_start:]
+    tail = re.sub(rf'(?m)^{key} = ".*"\n?', "", tail)
+    tail = tail.replace("[opencode]\n", f'[opencode]\n{key} = "{full}"\n', 1)
+    cfg.write_text(head + tail)
+    setup_opencode()
+    budget.refresh()
+    b = budget.month()
+    oc = {**OPENCODE_DEFAULTS, **config.load().get("opencode", {})}
+    note = (f" BUT the DeepInfra budget is {b['share']:.0%} used, so until next month every reply still runs on "
+            f"{oc['budget_step_down']} (budget step-down). Tell the user that." if b["share"] >= 0.8 else
+            " It applies from the next message.")
+    return f"RECEIPT: OpenCode {target} model setting changed from {old} to {full} (saved in {cfg}).{note}"

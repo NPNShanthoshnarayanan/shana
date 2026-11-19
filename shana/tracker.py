@@ -58,6 +58,26 @@ def add(title: str, details: str = "", source: str = "user", kind: str = "?") ->
     return meta
 
 
+def _words(text: str) -> set[str]:
+    return {w for w in re.findall(r"[a-z0-9]{4,}", text.lower())}
+
+
+def add_or_match(title: str, details: str = "", source: str = "user", kind: str = "?") -> tuple[dict | None, dict | None]:
+    """Create an issue unless an open one says much the same; returns (new, existing_match)."""
+    words = _words(title)
+    for i in list_issues():
+        if i.get("status") in ("closed", "dropped", "fixed"):
+            continue
+        other = _words(i.get("title", ""))
+        if words and other and len(words & other) / len(words | other) >= 0.5:
+            return None, i
+    return add(title, details, source, kind), None
+
+
+def close(n: int, reason: str = "") -> dict | None:
+    return set_status(n, "closed", f"## Closed ({now():%Y-%m-%d})\n{reason or 'closed'}")
+
+
 def set_status(n: int, status: str, append: str = "") -> dict | None:
     i = get(n)
     if not i:
@@ -81,7 +101,9 @@ def from_errors(day: date) -> int:
 
 PLAN_PROMPT = """You maintain a small Python tool called Shana (code in the current folder: shana/*.py, tests in tests/).
 Write a short fix plan in simple English for this issue. Return ONLY JSON:
-{{"kind": "bug" or "feature", "plan": ["step 1", "step 2", "..."], "files": ["files to change"], "test": "how to test"}}
+{{"kind": "bug" or "feature", "plan": ["step 1", "step 2", "..."], "files": ["files to change"], "test": "how to test",
+ "check": "ONE shell command run in the Shana folder that FAILS now and PASSES once the user's problem is really gone
+ (it must test the real symptom, not just that code exists), or \"manual: <what the user should try>\" if no command can"}}
 
 Issue #{id}: {title}
 {body}
@@ -90,6 +112,10 @@ Issue #{id}: {title}
 FIX_PROMPT = """Implement this approved plan for issue #{id} in the Shana tool (current folder).
 Keep changes small. Add or update a test in tests/. Then run: python3 -m unittest discover -s tests -q
 Finish with 3 short lines: what changed, files, test result.
+
+The fix must be GLOBAL, not just for this session: if it changes how Shana or its agent behaves (labels, routing,
+cost tracking, wording), update the shared prompt {prompt_file} and/or the shared config (config.example.toml,
+shana/config.py defaults) as well as the code, so every session benefits.
 
 Issue: {title}
 {body}
@@ -105,22 +131,54 @@ def plan(n: int) -> dict | None:
         return set_status(n, i["status"], f"## Plan\n(planning failed: {short(res.error or res.text, 200)})")
     i["kind"] = data.get("kind", i.get("kind", "?"))
     text = "\n".join(f"{k + 1}. {s}" for k, s in enumerate(data.get("plan", [])))
-    _write(i, i["body"] + f"\n## Plan\n{text}\n\nFiles: {', '.join(data.get('files', []))}\nTest: {data.get('test', '')}\n")
+    _write(i, i["body"] + f"\n## Plan\n{text}\n\nFiles: {', '.join(data.get('files', []))}\nTest: {data.get('test', '')}\n"
+                          f"Check: {data.get('check') or 'manual: try it yourself'}\n")
     return set_status(n, "planned")
 
 
+def fix_prompt(i: dict) -> str:
+    return FIX_PROMPT.format(prompt_file=config.path("agents", "shana.md"), **i)
+
+
+def _check_cmd(i: dict) -> str:
+    m = re.search(r"^Check: (.+)$", i.get("body", ""), re.M)
+    return m.group(1).strip() if m else "manual: try it yourself"
+
+
 def fix(n: int) -> dict | None:
-    """Only for approved issues: an agent makes the change, then the test suite decides."""
+    """Approved issues only. Fixed = tests pass AND the issue's own check proves the symptom is gone; else not fixed."""
+    from shana import notify
     i = get(n)
     if not i or i.get("status") != "approved":
         return i
-    res = models.run(models.pick("mid"), FIX_PROMPT.format(**i), cwd=config.home(), agent=True, timeout=1800,
+    check = _check_cmd(i)
+    shell = (lambda: run(["/bin/sh", "-c", check], cwd=config.home(), timeout=600)) if not check.startswith("manual") else None
+    before = shell() if shell else None
+    res = models.run(models.pick("mid"), fix_prompt(i), cwd=config.home(), agent=True, timeout=1800,
                      label=f"issue-{n}-fix")
     tests = run(["python3", "-m", "unittest", "discover", "-s", "tests", "-q"], cwd=config.home(), timeout=600)
-    ok = res.ok and tests.returncode == 0
-    note = (f"## Result ({now():%Y-%m-%d %H:%M})\n{short(res.text or res.error, 600)}\n\n"
-            f"Tests: {'passed' if tests.returncode == 0 else 'FAILED'}\n```\n{(tests.stderr or tests.stdout)[-800:]}\n```")
-    return set_status(n, "fixed" if ok else "approved", note)
+    after = shell() if shell else None
+    tests_ok = res.ok and tests.returncode == 0
+    if not tests_ok:
+        status, why = "approved", "tests failed or the fixing agent failed"
+    elif shell is None:
+        status, why = "needs-check", f"please check it yourself: {check[7:].strip()}"
+    elif after.returncode != 0:
+        status, why = "approved", "its check still fails, so the problem is not gone"
+    elif before is not None and before.returncode == 0:
+        status, why = "needs-check", "the check also passed before the fix, so it does not prove anything; please try it"
+    else:
+        status, why = "fixed", "tests pass and its check now passes (it failed before)"
+    tail = (tests.stderr or tests.stdout)[-600:] + "\n" + ((after.stdout + after.stderr) if after else "")[-400:]
+    note = (f"## Result ({now():%Y-%m-%d %H:%M}) → {status}: {why}\n{short(res.text or res.error, 600)}\n\n"
+            f"Tests: {'passed' if tests.returncode == 0 else 'FAILED'}\nCheck: {check}\n```\n{tail}\n```")
+    out = set_status(n, status, note)
+    if status == "fixed":
+        run(["git", "add", "-A"], cwd=config.home())
+        run(["git", "commit", "-qm", f"🐛 fix(#{n}): {short(i['title'], 60)}"], cwd=config.home())
+    icon = {"fixed": "✅", "needs-check": "🟡"}.get(status, "❌")
+    notify.send(f"{icon} Shana issue #{n}: {status}", short(f"{i['title']} — {why}", 200))
+    return out
 
 
 def from_quality(day: date, min_steps: int = 3, max_fail_rate: float = 0.3) -> int:

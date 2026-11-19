@@ -32,6 +32,25 @@ def _excerpt(s: logs.Session, start: datetime) -> tuple[str, str]:
     return "\n".join(f"- {short(m, 400)}" for m in user), "\n".join(f"- {short(m, 500)}" for m in ai)
 
 
+def _opencode_quality(start: datetime) -> int:
+    """User corrections and false model labels in OpenCode chats become issues by themselves (no need to flag)."""
+    from shana import opencode
+    added = 0
+    signals = opencode.quality_signals(start)
+    for s in [x for x in signals if x["kind"] == "user-correction"][:5]:
+        new, _ = tracker.add_or_match(f"Wrong answer flagged by user: {s['user'][:70]}",
+                                      f"Session: {s['session']}\n\nShana said:\n> {s['shana_said']}\n\nUser: {s['user']}",
+                                      source="auto", kind="bug")
+        added += bool(new)
+    labels = [x for x in signals if x["kind"] == "false-model-label"]
+    if labels:
+        new, _ = tracker.add_or_match(f"Replies named the wrong model ({len(labels)} times)",
+                                      "\n".join(f"- said [{x['label']}] but ran on {x['real']}" for x in labels[:10]),
+                                      source="auto", kind="bug")
+        added += bool(new)
+    return added
+
+
 def run_day(day: date) -> dict:
     start = datetime.combine(day, time.min).astimezone()
     done_path = config.path("data", "nightly-done.json")
@@ -60,7 +79,7 @@ def run_day(day: date) -> dict:
         for p in data.get("shana_problems", [])[:3] if mentions_shana else []:
             stats["issues"] += bool(tracker.add(p, f"Seen in session: {s.label}", source="auto"))
         done[key] = str(s.last_time)
-    stats["issues"] += tracker.from_errors(day) + tracker.from_quality(day)
+    stats["issues"] += tracker.from_errors(day) + tracker.from_quality(day) + _opencode_quality(start)
     planned = tracker.auto_plan()
     if planned:
         from shana import notify

@@ -1,6 +1,7 @@
 """Read OpenCode sessions (its local SQLite database) so the monitor and the nightly report cover OpenCode too."""
 from __future__ import annotations
 
+import re
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime
@@ -55,3 +56,73 @@ def sessions(since: datetime) -> list[OcSession]:
         con.close()
     return [OcSession(r[0], r[1] or "", r[2], r[3] or "", float(r[4] or 0), int(r[5] or 0), _ts(r[6]), _ts(r[7]),
                       _ts(r[8]), _ts(r[9]), r[10]) for r in rows]
+
+
+def provider_models(provider: str) -> set[str]:
+    """Model ids OpenCode lists for a provider (empty set if the CLI is unavailable)."""
+    from shana.util import run
+    try:
+        cp = run(["opencode", "models"], timeout=60)
+    except Exception:  # noqa: BLE001
+        return set()
+    return {line.split("/", 1)[1] for line in cp.stdout.splitlines() if line.startswith(provider + "/")}
+
+
+def _messages(session_id: str) -> list[tuple[str, dict]]:
+    import json
+    con = sqlite3.connect(f"file:{db_path()}?mode=ro", uri=True, timeout=5)
+    try:
+        rows = con.execute("select type, data from session_message where session_id=? order by seq",
+                           (session_id,)).fetchall()
+    finally:
+        con.close()
+    return [(t, json.loads(d or "{}")) for t, d in rows]
+
+
+def models_report(hours: int = 12) -> str:
+    """Which models really answered in recent sessions (and subagents), with cost — from OpenCode's own records."""
+    from datetime import timedelta
+    from shana.util import now
+    rows = sorted(sessions(now() - timedelta(hours=hours)), key=lambda s: s.created)
+    if not rows:
+        return "No OpenCode sessions in that time."
+    out = []
+    for s in rows:
+        used: dict[str, list] = {}
+        for t, d in _messages(s.id):
+            if t == "assistant":
+                m = (d.get("model") or {}).get("id", "?")
+                u = used.setdefault(m, [0, 0.0])
+                u[0] += 1
+                u[1] += float(d.get("cost") or 0)
+        models = ", ".join(f"{m} ×{n} (${c:.3f})" for m, (n, c) in used.items()) or "no replies"
+        out.append(f"{'  ↳ ' if s.parent_id else ''}{s.title or s.id[-8:]}: {models}")
+    return "\n".join(out)
+
+
+_CORRECTION = re.compile(r"\b(u r wrong|you are wrong|you're wrong|ur wrong|not correct|incorrect|wrong answer|"
+                         r"dont assume|don't assume|no assumption|that is wrong|thats wrong|that's wrong)\b", re.I)
+_LABEL = re.compile(r"^\W*\[([^\]]{2,40})\]")
+
+
+def quality_signals(since) -> list[dict]:
+    """Real signals of bad answers: the user correcting Shana, or a reply naming a model it was not."""
+    found = []
+    for s in sessions(since):
+        if s.parent_id:
+            continue
+        msgs = _messages(s.id)
+        for k, (t, d) in enumerate(msgs):
+            if t == "user" and _CORRECTION.search(d.get("text", "")):
+                prev = next((x for tt, x in reversed(msgs[:k]) if tt == "assistant"), {})
+                said = " ".join(p.get("text", "") for p in prev.get("content", []) if p.get("type") == "text")
+                found.append({"kind": "user-correction", "session": s.title, "user": d.get("text", "")[:200],
+                              "shana_said": said[:300]})
+            if t == "assistant":
+                real = (d.get("model") or {}).get("id", "")
+                text = " ".join(p.get("text", "") for p in d.get("content", []) if p.get("type") == "text")
+                m = _LABEL.match(text)
+                norm = lambda x: re.sub(r"[^a-z0-9]", "", x.lower())  # noqa: E731
+                if m and real and norm(m.group(1)) not in norm(real) and norm(real.split("/")[-1]) not in norm(m.group(1)):
+                    found.append({"kind": "false-model-label", "session": s.title, "label": m.group(1), "real": real})
+    return found

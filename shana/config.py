@@ -13,6 +13,7 @@ DEFAULTS: dict = {
         "finished_min_seconds": 60,  # only ping "finished" for turns longer than this
         "window_minutes": 120,  # sessions touched within this window are watched
         "same_work_threshold": 0.45,
+        "loop_threshold": 20,  # consecutive same tool calls to flag as a doom loop
     },
     "topics": {"ping_after_minutes": 60},
     "report": {"ccusage": "ccusage@20.0.51"},
@@ -26,11 +27,11 @@ DEFAULTS: dict = {
     },
     # Each tier is a list of "provider:model"; the first available one is used.
     "models": {
-        "cheap": ["deepseek:deepseek-chat", "kimi:kimi-k2-turbo-preview", "claude:haiku"],
+        "cheap": ["claude:haiku", "deepseek:deepseek-chat", "kimi:kimi-k2-turbo-preview"],
         "mid": ["claude:sonnet"],
         "strong": ["claude:opus"],
         "plan": ["claude:opus"],
-        "summarize": ["deepseek:deepseek-chat", "claude:haiku"],
+        "summarize": ["claude:haiku", "deepseek:deepseek-chat"],
     },
     # Non-Claude providers run through Claude Code pointed at their Anthropic-compatible endpoint.
     # Prices are USD per 1M tokens; fill them from the provider's price page (0 = unknown).
@@ -41,7 +42,7 @@ DEFAULTS: dict = {
                  "price_in": 0.0, "price_out": 0.0},
         # One key, many open models; per-model prices go in `prices = {"<model>" = [in, out]}`.
         "deepinfra": {"base_url": "https://api.deepinfra.com/anthropic", "key_env": "DEEPINFRA_API_KEY",
-                      "price_in": 0.0, "price_out": 0.0, "prices": {}},
+                      "price_in": 0.0, "price_out": 0.0, "prices": {}, "monthly_cap_usd": 3.0},
     },
     "orchestrator": {"budget_usd": 2.0, "max_escalations": 2, "step_timeout_s": 900, "check_timeout_s": 600},
 }

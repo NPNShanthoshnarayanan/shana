@@ -32,6 +32,7 @@ class Session:
     assistant_texts: list[tuple[datetime | None, str]] = field(default_factory=list)
     usage: dict[str, dict] = field(default_factory=dict)  # message id -> {ts, model, input, output, cache_*}
     tool_errors: list[str] = field(default_factory=list)
+    tool_calls: list[str] = field(default_factory=list)  # ordered list of tool names called
 
     @property
     def project(self) -> str:
@@ -45,6 +46,29 @@ class Session:
     @property
     def label(self) -> str:
         return self.title or (self.user_msgs[0][1][:60] if self.user_msgs else self.id[:8])
+
+    @property
+    def max_consecutive_same_tool(self) -> int:
+        """Largest run of consecutive identical tool calls (0 if < 2 calls)."""
+        if len(self.tool_calls) < 2:
+            return 0
+        best = cur = 1
+        for i in range(1, len(self.tool_calls)):
+            cur = cur + 1 if self.tool_calls[i] == self.tool_calls[i - 1] else 1
+            best = max(best, cur)
+        return best if best >= 2 else 0
+
+    @property
+    def dominant_tool(self) -> str:
+        """The tool name that repeats most consecutively, or ''."""
+        if self.max_consecutive_same_tool < 2:
+            return ""
+        cur, best, best_name = 1, 1, self.tool_calls[0]
+        for i in range(1, len(self.tool_calls)):
+            cur = cur + 1 if self.tool_calls[i] == self.tool_calls[i - 1] else 1
+            if cur > best:
+                best, best_name = cur, self.tool_calls[i]
+        return best_name
 
 
 def internal_ids() -> set[str]:
@@ -129,6 +153,7 @@ def read_claude(p: Path, tail_bytes: int | None = None) -> Session:
                 continue
             if c.get("type") == "tool_use":
                 s.last_role, s.last_kind, s.last_time = "assistant", "tool_use", ts
+                s.tool_calls.append(str(c.get("name", "")))
                 ask = (c.get("input") or {}).get("ask") if str(c.get("name", "")).endswith("wrap_up") else None
                 if ask:
                     s.pending_ask = ask

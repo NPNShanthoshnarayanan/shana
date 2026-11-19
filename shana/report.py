@@ -83,6 +83,27 @@ def ledger(day: date) -> dict:
             "extra_tokens": sum(e["tokens_in"] + e["tokens_out"] for e in extra)}
 
 
+def deepinfra_month(day: date) -> dict:
+    """Per-model DeepInfra calls/tokens/cost for the month of `day`, the $ cap left, and Claude Pro tokens ($0 marginal)."""
+    rows = [e for e in read_jsonl(config.path("data", "ledger.jsonl"))
+            if parse_ts(e["ts"]).astimezone().strftime("%Y-%m") == f"{day:%Y-%m}"]
+    by: dict[str, dict] = {}
+    pro = {"calls": 0, "tokens": 0}
+    for e in rows:
+        if e.get("provider") == "claude":
+            pro["calls"] += 1
+            pro["tokens"] += e.get("tokens_in", 0) + e.get("tokens_out", 0)
+        elif e.get("provider") == "deepinfra":
+            m = by.setdefault(e["spec"].split(":", 1)[1], {"calls": 0, "tokens_in": 0, "tokens_out": 0, "cost": 0.0})
+            m["calls"] += 1
+            m["tokens_in"] += e.get("tokens_in", 0)
+            m["tokens_out"] += e.get("tokens_out", 0)
+            m["cost"] += e.get("cost_usd", 0)
+    cap = float(config.load()["providers"]["deepinfra"].get("monthly_cap_usd", 3.0))
+    total = sum(m["cost"] for m in by.values())
+    return {"by_model": by, "total": total, "cap": cap, "remaining": cap - total, "claude_pro": pro}
+
+
 def opencode_usage(day: date) -> dict:
     """OpenCode sessions started that day (ccusage already prices them; this is the cross-check and the count)."""
     from shana import opencode

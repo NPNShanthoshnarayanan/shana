@@ -22,14 +22,27 @@ TOOLS = {
     "shana_open_items": ("List things the user left open (unanswered questions, half-done tasks, pending decisions).", _s()),
     "shana_open_close": ("Close open item by its number. how: done or drop.",
                          _s(number="integer", how={"type": "string", "enum": ["done", "drop"]})),
-    "shana_issue_add": ("Record a problem or feature request for the Shana tool itself.", _s(title="string", details="string")),
+    "shana_issue_add": ("Record a problem with Shana ITSELF (a wrong answer it gave, its behaviour, UI, cost, missing "
+                        "feature). Never use it for bugs in other projects or tools.", _s(title="string", details="string")),
+    "shana_issue_close": ("Close a Shana issue that is not needed (made by mistake, duplicate, not a Shana problem).",
+                          _s(number="integer", reason="string")),
+    "shana_set_model": ("Really change which model OpenCode uses for 'chat' (Shana), 'subagents' or 'explore'. Use a "
+                        "DeepInfra model id like deepseek-ai/DeepSeek-V4.1-Flash. Applies to the next message.",
+                        _s(target={"type": "string", "enum": ["chat", "subagents", "explore"]}, model="string")),
+    "shana_models_used": ("The REAL models (and cost) used by recent OpenCode sessions and their subagents, read from "
+                          "OpenCode's database. Use it before saying which model did something.", _s(hours="integer")),
+    "shana_jobs": ("ALWAYS use for any question about background jobs, workers or tasks Shana started (status, "
+                   "result, which model): lists recent jobs with real status and model. Jobs are not in the project "
+                   "folder, so never search files for them.", _s()),
+    "shana_budget": ("Real DeepInfra spend this month vs the monthly cap, per model.", _s()),
     "shana_issues": ("List Shana's own issues and their status.", _s()),
     "shana_proof_check": ("Check that numbers in an answer appear in the given source files or texts.",
                           _s(answer="string", sources={"type": "array", "items": {"type": "string"}})),
     "shana_worker": ("Hand one task to a background worker (default: Claude Opus via the Claude subscription) and get a "
                      "job id at once; the user gets a ping when it is done. Use for hard steps.",
                      _s(task="string", cwd="string", model={"type": "string", "enum": ["opus", "sonnet", "cheap"]})),
-    "shana_job_status": ("Status and result of a background worker job.", _s(job_id="string")),
+    "shana_job_status": ("Status and result of a background worker job (full id, part of it, or 'latest').",
+                         _s(job_id="string")),
     "shana_issue_approve": ("Approve the planned fix for a Shana issue and start fixing it in the background "
                             "(only after the user says yes).", _s(number="integer")),
     "shana_cost_today": ("Today's Claude tokens and Shana's extra model costs so far (fast estimate).", _s()),
@@ -43,15 +56,31 @@ def call(name: str, a: dict) -> str:
         return "\n".join(f"{h['file']}: {h['text']}" for h in memory.search(a.get("query", ""))) or "Nothing found."
     if name == "shana_memory_add":
         line = memory.add(a.get("kind", "fact"), a.get("text", ""), a.get("project") or "general", source="chat")
-        return f"Saved: {line}" if line else "Already saved."
+        return f"RECEIPT: saved to memory: {line}" if line else "RECEIPT: nothing saved (already in memory)."
     if name == "shana_open_items":
         return "\n".join(f"{i['n']}. {i['text']} ({i['date']})" for i in memory.open_items()) or "Nothing open."
     if name == "shana_open_close":
         text = memory.close_open(int(a.get("number", 0)), a.get("how", "done"))
-        return f"Closed: {text}" if text else "No such open item."
+        return f"RECEIPT: open item closed ({a.get('how', 'done')}): {text}" if text else "NOT DONE: no such open item."
     if name == "shana_issue_add":
-        i = tracker.add(a.get("title", ""), a.get("details", ""))
-        return f"Issue #{i['id']} recorded." if i else "Already recorded."
+        i, dup = tracker.add_or_match(a.get("title", ""), a.get("details", ""))
+        return (f"RECEIPT: same as existing issue #{dup['id']} ({dup['title']}); nothing new created." if dup
+                else f"RECEIPT: issue #{i['id']} created.")
+    if name == "shana_issue_close":
+        i = tracker.close(int(a.get("number", 0)), a.get("reason", ""))
+        return f"RECEIPT: issue #{i['id']} closed: {a.get('reason', '')}" if i else "NOT DONE: no such issue."
+    if name == "shana_set_model":
+        from shana import install
+        return install.set_opencode_model(a.get("target", "chat"), a.get("model", ""))
+    if name == "shana_models_used":
+        from shana import opencode
+        return opencode.models_report(int(a.get("hours") or 12))
+    if name == "shana_jobs":
+        from shana import worker
+        return worker.list_jobs()
+    if name == "shana_budget":
+        from shana import budget
+        return budget.summary(budget.refresh())
     if name == "shana_issues":
         return "\n".join(f"#{i['id']} [{i.get('status')}] {i.get('title')}" for i in tracker.list_issues()) or "No issues."
     if name == "shana_proof_check":
@@ -61,7 +90,8 @@ def call(name: str, a: dict) -> str:
         m = a.get("model") or "opus"
         spec = models.pick("cheap") if m == "cheap" else f"claude:{m}"
         job = worker.start(a.get("task", ""), a.get("cwd") or ".", spec)
-        return f"Started job {job['id']} on {spec}. Shana will ping when it is done."
+        return (f"RECEIPT: job {job['id']} started on {spec} ({worker.billing(spec)}). It pings the user when done; "
+                "check it later with shana_job_status (job id or 'latest'). It has NOT finished yet.")
     if name == "shana_job_status":
         from shana import worker
         return worker.status(a.get("job_id", ""))
@@ -73,11 +103,14 @@ def call(name: str, a: dict) -> str:
             return "No such issue."
         subprocess.Popen([str(config.path("bin", "shana")), "issue", "fix", str(n)], start_new_session=True,
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL)
-        return f"Issue #{n} approved; the fix runs in the background and is kept only if the tests pass."
+        return (f"RECEIPT: issue #{n} approved; the fix runs in the background. It counts as fixed only when the tests "
+                "pass AND the issue's own check proves the problem is gone; the user gets a ping with the result. "
+                "It is NOT fixed yet.")
     if name == "shana_cost_today":
+        from shana import budget
         day = now().date()
-        t, led = report.claude_tokens(day), report.ledger(day)
-        return f"Claude tokens today: {t['total']:,}. Shana extra model cost: ${led['extra_cost']:.2f}."
+        t = report.claude_tokens(day)
+        return f"Claude (subscription) tokens today: {t['total']:,}.\n" + budget.summary(budget.refresh())
     raise KeyError(name)
 
 

@@ -31,6 +31,20 @@ class Result:
     error: str = ""
     session_id: str = ""
 
+    def tagged(self) -> str:
+        return f"{tag(self.spec)} {self.text or self.error}"
+
+
+def tag(spec: str) -> str:
+    """Label added by code from the model actually started, e.g. '[Claude sonnet · Pro]', '[DeepSeek V4.1 Flash]'."""
+    provider, model = spec.split(":", 1)
+    return f"[Claude {model} · Pro]" if provider == "claude" else f"[{pretty(model)}]"
+
+
+def pretty(model_id: str) -> str:
+    """'deepseek-ai/DeepSeek-V4.1-Flash' -> 'DeepSeek V4.1 Flash'."""
+    return model_id.split("/")[-1].replace("-", " ")
+
 
 def claude_bin() -> str:
     return shutil.which("claude") or str(Path.home() / ".local" / "bin" / "claude")
@@ -41,13 +55,18 @@ def available(spec: str) -> bool:
     if provider == "claude":
         return Path(claude_bin()).exists()
     p = config.load()["providers"].get(provider)
-    return bool(p and config.secret(p["key_env"]))
+    if not (p and config.secret(p["key_env"])):
+        return False
+    if provider == "deepinfra":
+        from shana import budget
+        return not budget.over_cap()  # monthly cap reached: the next model in the tier (Claude) takes the work
+    return True
 
 
 def pick(tier: str) -> str:
     specs = config.load()["models"].get(tier) or ["claude:haiku"]
     specs = [specs] if isinstance(specs, str) else specs
-    return next((s for s in specs if available(s)), "claude:haiku")
+    return next((s for s in specs if available(s)), "claude:haiku")  # config order decides; see config.toml
 
 
 def _cost(provider: str, model: str, data: dict, tin: int, tout: int) -> float:
