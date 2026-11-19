@@ -490,6 +490,35 @@ class HonestyFixes(unittest.TestCase):
         self.assertEqual(kinds.count("user-correction"), 1)
         self.assertIn("DeepSeek-V4-Pro ×1", report_text)
 
+    def test_scheduled_scan_reads_only_new_messages(self):
+        import sqlite3
+        from shana import scan
+        db = Path(TMP, "oc-scan.db")
+        db.unlink(missing_ok=True)
+        con = sqlite3.connect(db)
+        con.execute("create table session_v2 (id, title, parent_id, directory, cost, tokens_input, tokens_output, "
+                    "tokens_cache_read, tokens_cache_write, time_created, time_updated, time_busy, time_idle, idle_outcome)")
+        con.execute("create table session_message (id, session_id, type, seq, time_created, data)")
+        t = int(now().timestamp() * 1000)
+        con.execute("insert into session_v2 values ('sx','Scan chat',null,'/x',0,0,0,0,0,?,?,?,?,'')", (t, t, t, t))
+        con.execute("insert into session_v2 values ('cx','child','sx','/x',0,0,0,0,0,?,?,?,?,'')", (t, t, t, t))
+        for k, (typ, d) in enumerate([("user", {"text": "switch to V3.2"}),
+                                      ("assistant", {"content": [{"type": "text", "text": "Done, switched."}]})]):
+            con.execute("insert into session_message values (?,?,?,?,?,?)", (f"q{k}", "sx", typ, k + 1, t, json.dumps(d)))
+        con.commit()
+        con.close()
+        cfg = config.load()
+        cfg["opencode"] = {"db": str(db)}
+        found = {"issues": [{"title": "Claimed a model switch it never did", "evidence": "Done, switched.", "kind": "bug"}]}
+        runner = mock.Mock(return_value=(found, Result(True, "", "m")))
+        with mock.patch.object(config, "load", return_value=cfg):
+            first = scan.run(runner=runner)
+            second = scan.run(runner=runner)  # nothing new since the first scan
+        self.assertEqual(first["new_issues"], 1)
+        self.assertEqual(runner.call_count, 1)
+        self.assertEqual(second["sessions"], 0)
+        self.assertIn("Done, switched.", runner.call_args.args[1])
+
     def test_live_status_has_real_jobs_and_budget(self):
         from shana import budget, worker
         worker.start("live block job", TMP, "claude:sonnet", launcher=lambda c: None)

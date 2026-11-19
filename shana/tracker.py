@@ -6,7 +6,7 @@ Status flow: new → planned → approved → fixed (or dropped).
 from __future__ import annotations
 
 import re
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 
 from shana import config, models
@@ -62,14 +62,16 @@ def _words(text: str) -> set[str]:
     return {w for w in re.findall(r"[a-z0-9]{4,}", text.lower())}
 
 
-def add_or_match(title: str, details: str = "", source: str = "user", kind: str = "?") -> tuple[dict | None, dict | None]:
-    """Create an issue unless an open one says much the same; returns (new, existing_match)."""
+def add_or_match(title: str, details: str = "", source: str = "user", kind: str = "?",
+                 threshold: float = 0.5) -> tuple[dict | None, dict | None]:
+    """Create an issue unless an open one (or one closed in the last 3 days) says much the same."""
     words = _words(title)
+    recent = f"{now() - timedelta(days=3):%Y-%m-%d}"
     for i in list_issues():
-        if i.get("status") in ("closed", "dropped", "fixed"):
+        if i.get("status") in ("closed", "dropped", "fixed") and i.get("created", "") < recent:
             continue
         other = _words(i.get("title", ""))
-        if words and other and len(words & other) / len(words | other) >= 0.5:
+        if words and other and len(words & other) / min(len(words), len(other)) >= threshold + 0.1:
             return None, i
     return add(title, details, source, kind), None
 

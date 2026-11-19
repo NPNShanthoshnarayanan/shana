@@ -61,6 +61,12 @@ the background (OpenCode itself can only use Claude with an API key). Shana adds
 
 ## Self-improving
 
+Every 2 hours (`com.shana.track`, also nightly) the tracker reads only the new parts of your Shana chats
+in OpenCode and notes Shana's own problems as issues: wrong or unchecked answers, "done" without proof, requests it
+skipped, things you had to repeat, confusing answers. Test and scratch folders are skipped, similar issues are merged,
+and at most 5 new issues are noted per run; you get a ping when it notes something. Run it by hand: `shana track`.
+
+
 Shana's own errors, failed model checks (a model failing ≥30% of its steps in a day) and complaints it finds in your
 sessions become issues. Each night new issues get a fix plan by themselves and you get a ping; a fix runs only after
 you approve (`shana issue approve N` / `shana issue fix N`, or ask Shana), and is kept only if the tests pass.

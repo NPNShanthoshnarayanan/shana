@@ -53,6 +53,8 @@ def main(argv: list[str] | None = None) -> int:
     w = sub.add_parser("worker", help="run a background worker job (started by the shana_worker tool)")
     w.add_argument("job_id")
     sub.add_parser("opencode-setup", help="make Shana the default agent in OpenCode")
+    tr = sub.add_parser("track", help="tracker scan: read new conversation parts and note Shana's problems")
+    tr.add_argument("--hours", type=int, default=48)
     sub.add_parser("mcp", help="MCP server (used by AI tools)")
     sub.add_parser("install", help="add hooks, MCP server and background jobs")
     sub.add_parser("uninstall", help="remove hooks, MCP server and background jobs")
@@ -77,6 +79,10 @@ def _dispatch(a: argparse.Namespace) -> int:
     if a.cmd == "worker":
         from shana import worker
         worker.run(a.job_id)
+        return 0
+    if a.cmd == "track":
+        from shana import scan
+        print(json.dumps(scan.run(a.hours), indent=1))
         return 0
     if a.cmd == "opencode-setup":
         from shana import install

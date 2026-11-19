@@ -11,7 +11,7 @@ from shana import config, memory, notify
 from shana.util import now, run
 
 HOOKS = {"Stop": "stop", "Notification": "notification", "SessionStart": "session-start"}
-AGENTS = {"com.shana.poll": None, "com.shana.nightly": None}
+AGENTS = {"com.shana.poll": None, "com.shana.nightly": None, "com.shana.track": None}
 SETTINGS = Path.home() / ".claude" / "settings.json"
 LAUNCH = Path.home() / "Library" / "LaunchAgents"
 
@@ -75,6 +75,9 @@ def install_jobs() -> list[str]:
     hour = int(config.load()["report"].get("hour", 21))
     jobs = {
         "com.shana.poll": _plist("com.shana.poll", [bin_path(), "poll"], "<key>StartInterval</key><integer>180</integer>"),
+        "com.shana.track": _plist("com.shana.track", [bin_path(), "track"],
+                                  "<key>StartInterval</key><integer>" + str(int(config.load().get("tracker", {}).get(
+                                      "scan_every_minutes", 120)) * 60) + "</integer>"),
         "com.shana.nightly": _plist("com.shana.nightly", [bin_path(), "nightly"],
                                     f"<key>StartCalendarInterval</key><dict><key>Hour</key><integer>{hour}</integer>"
                                     "<key>Minute</key><integer>0</integer></dict>"),

@@ -80,6 +80,12 @@ def run_day(day: date) -> dict:
             stats["issues"] += bool(tracker.add(p, f"Seen in session: {s.label}", source="auto"))
         done[key] = str(s.last_time)
     stats["issues"] += tracker.from_errors(day) + tracker.from_quality(day) + _opencode_quality(start)
+    try:
+        from shana import scan
+        stats["issues"] += scan.run(hours=26)["new_issues"]
+    except Exception as e:  # noqa: BLE001
+        from shana.util import log_error
+        log_error("nightly.scan", e)
     planned = tracker.auto_plan()
     if planned:
         from shana import notify

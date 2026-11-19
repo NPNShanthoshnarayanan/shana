@@ -25,3 +25,7 @@ price_out = 0.0   # USD per 1M output tokens
 [orchestrator]
 budget_usd = 2.0
 max_escalations = 2
+
+[tracker]
+scan_every_minutes = 120   # how often the tracker reads new conversation parts (run `shana install` after changing)
+max_new_per_run = 5
