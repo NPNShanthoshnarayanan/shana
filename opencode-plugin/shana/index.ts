@@ -45,12 +45,17 @@ export default Plugin.define({
       })
       const said = lastUserText(event.messages).trim()
       if (BALANCE.test(said)) {
+        let spend = "Shana's spend count is not available right now"
+        try {
+          const b = JSON.parse(readFileSync(budgetFile, "utf8"))
+          spend = `Shana's count of DeepInfra spend in ${b.month}: $${(+b.spent).toFixed(2)} of the $${(+b.cap).toFixed(2)} monthly cap`
+        } catch {}
         event.system.push({
           type: "text",
           text:
-            "[Shana fact] Shana's key cannot read the DeepInfra balance: no API, page or curl call will work, so do " +
-            "not try any. Answer from the live status below (or shana_budget) and give the link " +
-            "https://deepinfra.com/dash/billing for the exact balance.",
+            "[Shana fact] Answer the balance question now from this fact; run NO tool or command for it. " +
+            `${spend}. Shana's key cannot read the real account balance; it is on https://deepinfra.com/dash/billing. ` +
+            "Reply in 2-3 short lines with these two facts.",
         })
       }
       if (ORDER.test(said)) {
