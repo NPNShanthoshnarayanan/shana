@@ -69,6 +69,10 @@ and at most 5 new issues are noted per run; you get a ping when it notes somethi
 The nightly run also counts, by code, replies that say "fixed/works/done" in a turn that ran no tool, and orders
 ("fix it") you had to repeat. "fix it", "yes" or "go ahead" counts as approval: Shana acts in the same turn.
 
+**Cache-friendly by design:** DeepInfra caches each request from its start, so the plugin keeps the top of every
+request the same from turn to turn (rules, model fact, a live block with no moving numbers). A changed top made a turn
+cost about 5× more in tests. The exact spend is added only when you ask about the balance.
+
 **Model quality watch:** every checked run (orchestrator steps, tracker fixes) records pass/fail per model. A model
 below 60% of its last 10 checked runs is benched for 24 h: its work goes to the next model in its tier, you get a ping,
 then it gets one trial run again. See `shana_model_quality` and the nightly report.

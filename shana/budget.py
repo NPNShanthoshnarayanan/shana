@@ -87,8 +87,9 @@ def write_live() -> str:
     b = month()
     check = [f"#{i['id']} {i['title'][:50]}" for i in tracker.list_issues("needs-check")]
     lines = [f"Background jobs (newest first): {'; '.join(jobs) or 'none yet'}",
-             f"DeepInfra this month: ${b['spent']:.2f} of ${b['cap']:.2f} cap (Shana's count). The exact account "
-             "balance cannot be read with Shana's key; it is on https://deepinfra.com/dash/billing",
+             # no exact spend here: this block heads every request, and a number that moves would break the cache
+             f"DeepInfra budget this month: {'cap reached' if b['share'] >= 1 else '80%+ used' if b['share'] >= .8 else 'under 80% used'}"
+             " (exact numbers: shana_budget; the real balance is only on https://deepinfra.com/dash/billing)",
              f"Open items waiting: {len(memory.open_items())}",
              "Model check pass rates: " + models.quality_report().replace("\n", "; "),
              f"Issues waiting for the user to check: {', '.join(check) or 'none'}"]

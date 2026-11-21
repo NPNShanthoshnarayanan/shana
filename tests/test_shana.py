@@ -525,7 +525,8 @@ class HonestyFixes(unittest.TestCase):
         worker.start("live block job", TMP, "claude:sonnet", launcher=lambda c: None)
         text = budget.write_live()
         self.assertIn("live-block-job", text)
-        self.assertIn("cap", text)
+        self.assertIn("DeepInfra budget this month: under 80% used", text)
+        self.assertNotIn("$", text)  # a moving spend number at the top of every request would break the cache
         self.assertEqual(config.path("data", "live.txt").read_text(), text)
 
     def test_set_model_gives_receipt_and_refuses_unknown(self):

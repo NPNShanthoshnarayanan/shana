@@ -4,7 +4,6 @@ import { Plugin } from "@opencode/plugin"
 import { readFileSync } from "node:fs"
 
 const pretty = (id: string) => id.split("/").pop()!.replace(/-/g, " ")
-const ORDER = /\b(fix|do)\s+(it|that|this|all|them|#\d+)\b|^\W*(yes|go ahead|just do it)\W*$/i
 
 const BALANCE = /\b(balance|credits?|remaining (money|amount|cost|budget)|how much (is )?left)\b/i
 
@@ -43,8 +42,20 @@ export default Plugin.define({
           `If you name the model (a label, or when asked which model answered), use exactly "[${pretty(event.model?.id ?? "?")}]". ` +
           `Never claim to be any other model, and never say you switched models: you cannot change your own model.`,
       })
-      const said = lastUserText(event.messages).trim()
-      if (BALANCE.test(said)) {
+      // The provider caches each request from its start, so everything here must stay the same from turn to turn:
+      // any change makes the whole chat be paid at full price again. Only a balance question adds a line, at the end.
+      event.system.push({
+        type: "text",
+        text:
+          "[Shana rule] If the user's newest message is a direct order (\"fix it\", \"do it\", \"fix all\", \"yes\", " +
+          "\"go ahead\"), it counts as approval: do the work in this turn. Do not ask \"Want me to…?\" or \"Shall I " +
+          "track this?\". For a Shana problem use shana_issue_add with fix_now=true or shana_issue_approve.",
+      })
+      try {
+        const live = readFileSync(liveFile, "utf8").slice(0, 900)
+        if (live) event.system.push({ type: "text", text: `[Shana live status, real data]\n${live}` })
+      } catch {}
+      if (BALANCE.test(lastUserText(event.messages).trim())) {
         let spend = "Shana's spend count is not available right now"
         try {
           const b = JSON.parse(readFileSync(budgetFile, "utf8"))
@@ -58,19 +69,6 @@ export default Plugin.define({
             "Reply in 2-3 short lines with these two facts.",
         })
       }
-      if (ORDER.test(said)) {
-        event.system.push({
-          type: "text",
-          text:
-            "[Shana fact] The user's last message is a direct order and counts as approval. Do the work now, in this " +
-            "turn. Do not ask \"Want me to…?\" or \"Shall I track this?\". For a Shana problem use shana_issue_add " +
-            "with fix_now=true or shana_issue_approve, then report the tool's RECEIPT.",
-        })
-      }
-      try {
-        const live = readFileSync(liveFile, "utf8").slice(0, 900)
-        if (live) event.system.push({ type: "text", text: `[Shana live status, real data, refreshed every few minutes]\n${live}` })
-      } catch {}
     })
 
     await ctx.session.hook("experimental.model.resolve", (event: any) => {
